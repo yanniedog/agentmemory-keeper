@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status','restart','reclaim','doctor','logs','daemon-start','stop','install','uninstall','help')]
+    [ValidateSet('status','restart','reclaim','doctor','logs','daemon-start','stop','install','uninstall','ingest','savings','help')]
     [string]$Command = 'status',
 
     [int]$Lines = 80
@@ -225,6 +225,31 @@ function Stop-All {
     Invoke-Reclaim
 }
 
+function Show-Savings {
+    try {
+        $resp = Invoke-WebRequest "http://127.0.0.1:$($cfg.restPort)/agentmemory/sessions" -UseBasicParsing -TimeoutSec 10
+        $d = $resp.Content | ConvertFrom-Json
+        $sArr = $d.sessions
+        $obs = ($sArr | Measure-Object observationCount -Sum).Sum
+        $estFull = $obs * 80
+        $estInjected = $sArr.Count * 2000
+        $pct = if ($estFull -gt 0) { [Math]::Round((1 - $estInjected / $estFull) * 100, 1) } else { 0 }
+        $saved = [Math]::Max(0, $estFull - $estInjected)
+        $cost = [Math]::Round($saved / 1000 * 0.30, 2)
+        Format-Section "Token Savings"
+        Write-Host ("  sessions     : {0}" -f $sArr.Count)
+        Write-Host ("  observations : {0:N0}" -f ([int]$obs))
+        Write-Host ""
+        Write-Host ("  Savings      : {0}%" -f $pct) -ForegroundColor Green
+        Write-Host ("  Tokens saved : {0:N0}" -f $saved) -ForegroundColor Green
+        Write-Host ("  ~Cost saved  : `${0:N2}" -f $cost) -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  Live: http://127.0.0.1:$($cfg.viewerPort)/"
+    } catch {
+        Write-Host "agentmemory not responding: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
 switch ($Command) {
     'status'        { Show-Status }
     'restart'       { Invoke-Restart }
@@ -235,6 +260,8 @@ switch ($Command) {
     'stop'          { Stop-All }
     'install'       { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Installer }
     'uninstall'     { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Uninstaller }
+    'ingest'        { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptRoot 'ingest.ps1') }
+    'savings'       { Show-Savings }
     'help'          { Get-Help $PSCommandPath -Detailed }
     default         { Show-Status }
 }

@@ -44,6 +44,8 @@ starts the keeper immediately. Verify:
 
 ```powershell
 .\ctl.ps1 status      # summary: daemon health, keeper pid, ports, last restarts
+.\ctl.ps1 savings     # current Token Savings % from the dashboard's formula
+.\ctl.ps1 ingest      # bulk-import all Claude Code transcripts (feeds savings)
 .\ctl.ps1 logs        # tail today's keeper log
 .\ctl.ps1 doctor      # full diagnostic dump for support
 .\ctl.ps1 restart     # force a full reclamation + restart cycle
@@ -51,6 +53,26 @@ starts the keeper immediately. Verify:
 .\ctl.ps1 stop        # stop keeper + daemon (e.g. before manual upgrade)
 .\ctl.ps1 uninstall   # remove scheduled tasks (leaves agentmemory itself alone)
 ```
+
+## Why does the dashboard show 0% token savings?
+
+The Token Savings stat card on the agentmemory viewer (`http://127.0.0.1:3113`) computes:
+
+```
+estFull     = totalObservations * 80
+estInjected = sessions * 2000
+savings %   = (1 - estInjected / estFull) * 100
+```
+
+It needs **observations** to compute against. Claude Code's hook chain feeds observations live, but other clients (Cursor MCP, Codex MCP) only record explicit `memory_save` calls.
+
+To seed the metric with historical data, run:
+
+```powershell
+.\ctl.ps1 ingest
+```
+
+This invokes `agentmemory import-jsonl` against `~/.claude/projects/`. A single import of a typical month of Claude Code sessions tends to surface 90%+ savings instantly. Cursor and Codex transcript imports are not yet supported upstream.
 
 ## Architecture
 
