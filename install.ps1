@@ -90,47 +90,47 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" 
 
 # -------- Task 1: keeper at logon ------------------------------------------
 $keeperAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"{0}"' -f $LauncherVbs)
-$keeperTriggers = @(
-    (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME")
-)
-
-# Add workstation-unlock trigger via CIM (no admin needed).
-try {
-    $unlockTrigger = New-CimInstance -ClassName MSFT_TaskSessionStateChangeTrigger `
-        -Namespace 'Root/Microsoft/Windows/TaskScheduler' `
-        -ClientOnly `
-        -Property @{
-            Enabled    = $true
-            StateChange = 8   # 8 = SessionUnlock
-            UserId     = "$env:USERDOMAIN\$env:USERNAME"
-        }
-    $keeperTriggers += $unlockTrigger
-} catch {
-    Write-Warning "Could not add workstation-unlock trigger: $($_.Exception.Message). Logon trigger alone is sufficient."
-}
+$keeperTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 
 Register-ScheduledTask -TaskName $TaskNameKeeper `
     -Action $keeperAction `
-    -Trigger $keeperTriggers `
+    -Trigger $keeperTrigger `
     -Settings $settings `
     -Principal $principal `
     -Description 'Keeps agentmemory daemon alive across sleep/wake, network changes, VPN, BleachBit, etc.' | Out-Null
 Write-Host "Installed task: $TaskNameKeeper"
 
-# -------- Task 2: watchdog every N minutes ---------------------------------
-$wdAction = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"{0}"' -f $WatchdogVbs)
-$wdStart = (Get-Date).AddMinutes(1)
-$wdTrigger = New-ScheduledTaskTrigger -Once -At $wdStart `
-    -RepetitionInterval (New-TimeSpan -Minutes $WatchdogIntervalMinutes) `
-    -RepetitionDuration (New-TimeSpan -Days 36500)
+# Best-effort: also add a workstation-unlock trigger via XML edit.
+# (Register-ScheduledTask rejects CIM-built session triggers due to PSTypeName checks,
+# so we mutate the task definition after registration.)
+try {
+    $task = Get-ScheduledTask -TaskName $TaskNameKeeper
+    $xml  = Export-ScheduledTask -TaskName $TaskNameKeeper
+    if ($xml -notmatch 'SessionStateChangeTrigger') {
+        $unlockXml = @"
+  <SessionStateChangeTrigger>
+    <Enabled>true</Enabled>
+    <StateChange>SessionUnlock</StateChange>
+    <UserId>$env:USERDOMAIN\$env:USERNAME</UserId>
+  </SessionStateChangeTrigger>
+"@
+        $newXml = $xml -replace '(</Triggers>)', ($unlockXml + "`r`n  `$1")
+        Register-ScheduledTask -TaskName $TaskNameKeeper -Xml $newXml -User "$env:USERDOMAIN\$env:USERNAME" -Force | Out-Null
+        Write-Host "  + added workstation-unlock trigger"
+    }
+} catch {
+    Write-Warning "Could not add unlock trigger (logon + watchdog is enough): $($_.Exception.Message)"
+}
 
-Register-ScheduledTask -TaskName $TaskNameWatchdog `
-    -Action $wdAction `
-    -Trigger $wdTrigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description 'Watchdog: restarts agentmemory-keeper if it ever dies, every 5 minutes.' | Out-Null
-Write-Host "Installed task: $TaskNameWatchdog (every $WatchdogIntervalMinutes min)"
+# -------- Task 2: watchdog every N minutes ---------------------------------
+# Use schtasks.exe because Register-ScheduledTask rejects indefinite repetition.
+$schtasksTr = 'wscript.exe "{0}"' -f $WatchdogVbs
+$schtasksOut = & schtasks.exe /Create /TN $TaskNameWatchdog /SC MINUTE /MO $WatchdogIntervalMinutes /TR $schtasksTr /F /RL LIMITED 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning ("schtasks.exe failed: {0}" -f ($schtasksOut -join "`n"))
+} else {
+    Write-Host "Installed task: $TaskNameWatchdog (every $WatchdogIntervalMinutes min)"
+}
 
 # -------- Kick off immediately --------------------------------------------
 Start-ScheduledTask -TaskName $TaskNameKeeper

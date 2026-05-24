@@ -351,16 +351,23 @@ function Invoke-Restart {
     param([string]$Reason)
     Write-Log "RESTART begin: $Reason"
 
-    # 1. Try graceful stop first.
-    try {
-        $shim = Join-Path $env:APPDATA 'npm\agentmemory.cmd'
-        if (Test-Path $shim) {
-            & $shim stop --force *> $null
+    # 1. Best-effort graceful stop, hard-bounded so a hung engine cannot block us.
+    $shim = Join-Path $env:APPDATA 'npm\agentmemory.cmd'
+    if (Test-Path $shim) {
+        try {
+            $job = Start-Job -ScriptBlock { param($s) & $s stop --force *> $null } -ArgumentList $shim
+            if (-not (Wait-Job $job -Timeout 8)) {
+                Write-Log "graceful 'agentmemory stop' timed out after 8s; proceeding to surgical kill" WARN
+                Stop-Job $job -ErrorAction SilentlyContinue
+            }
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-Log ("graceful stop threw: {0}" -f $_.Exception.Message) WARN
         }
-    } catch {}
+    }
 
     # 2. Surgical kill of our processes holding our ports.
-    $killed = Stop-AgentmemoryProcesses
+    $killed = @(Stop-AgentmemoryProcesses)
     Write-Log ("Reclaimed {0} process(es)" -f $killed.Count)
 
     # 3. Wait for ports to drain.
