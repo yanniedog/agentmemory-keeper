@@ -326,6 +326,12 @@ function Start-Agentmemory {
     $stdoutLog = Join-Path $LogDir "agentmemory-stdout-$stamp.log"
     $stderrLog = Join-Path $LogDir "agentmemory-stderr-$stamp.log"
 
+    # Inherit CI=1 so the agentmemory CLI never reaches an interactive
+    # prompt (iii console install, etc). Without this the CLI sometimes
+    # detects an attached TTY via Start-Process and blocks on `p.confirm`
+    # forever, leaving the engine half-up but the CLI deadlocked.
+    $prevCI = $env:CI
+    $env:CI = '1'
     try {
         $spArgs = @{
             FilePath               = $exe
@@ -339,8 +345,10 @@ function Start-Agentmemory {
         $proc = Start-Process @spArgs
     } catch {
         Write-Log ("Failed to spawn agentmemory: {0}" -f $_.Exception.Message) ERROR
+        if ($null -eq $prevCI) { Remove-Item Env:CI -ErrorAction SilentlyContinue } else { $env:CI = $prevCI }
         return $false
     }
+    if ($null -eq $prevCI) { Remove-Item Env:CI -ErrorAction SilentlyContinue } else { $env:CI = $prevCI }
 
     Write-Log ("Spawned agentmemory pid={0} via {1}; stdout={2}" -f $proc.Id, $exe, $stdoutLog)
     return $true

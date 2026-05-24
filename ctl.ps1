@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('status','restart','reclaim','doctor','logs','daemon-start','stop','install','uninstall','ingest','savings','help')]
+    [ValidateSet('status','restart','reclaim','doctor','logs','daemon-start','stop','install','uninstall','ingest','savings','watcher','watcher-logs','watcher-restart','help')]
     [string]$Command = 'status',
 
     [int]$Lines = 80
@@ -225,6 +225,59 @@ function Stop-All {
     Invoke-Reclaim
 }
 
+function Get-WatcherProcess {
+    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match 'watcher\.mjs' }
+}
+
+function Show-Watcher {
+    Format-Section "Transcript watcher"
+    $procs = @(Get-WatcherProcess)
+    if ($procs.Count -gt 0) {
+        foreach ($p in $procs) { Write-Host ("  watcher: pid={0} started={1}" -f $p.ProcessId, $p.CreationDate) -ForegroundColor Green }
+    } else {
+        Write-Host "  watcher: not running" -ForegroundColor Yellow
+    }
+    $state = Join-Path $StateDir 'watcher-state.json'
+    if (Test-Path $state) {
+        $s = Get-Content -Raw $state | ConvertFrom-Json
+        $files = @($s.offsets.PSObject.Properties.Name)
+        $regs  = @($s.registered.PSObject.Properties.Name)
+        Write-Host ("  tracked files     : {0}" -f $files.Count)
+        Write-Host ("  registered sessions: {0}" -f $regs.Count)
+    } else {
+        Write-Host "  no state file yet"
+    }
+    $queue = Join-Path $StateDir 'watcher-queue.ndjson'
+    if (Test-Path $queue) {
+        $qLines = @((Get-Content $queue -ErrorAction SilentlyContinue))
+        Write-Host ("  queued (engine outage replay): {0} entries" -f $qLines.Count) -ForegroundColor Yellow
+    } else {
+        Write-Host "  queue              : empty"
+    }
+    $log = Join-Path $LogDir ("watcher-" + (Get-Date -Format 'yyyy-MM-dd') + '.log')
+    if (Test-Path $log) {
+        Write-Host "  recent log lines:"
+        Get-Content $log -Tail 5 | ForEach-Object { Write-Host ("    {0}" -f $_) }
+    }
+}
+
+function Show-WatcherLogs {
+    $log = Join-Path $LogDir ("watcher-" + (Get-Date -Format 'yyyy-MM-dd') + '.log')
+    if (-not (Test-Path $log)) { Write-Host "no watcher log yet at $log"; return }
+    Get-Content $log -Tail $Lines -Wait
+}
+
+function Restart-Watcher {
+    @(Get-WatcherProcess) | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; Write-Host "killed watcher pid=$($_.ProcessId)" } catch {} }
+    try {
+        Start-ScheduledTask -TaskName 'AgentmemoryKeeperWatcher' -ErrorAction Stop
+        Write-Host "started watcher task" -ForegroundColor Green
+    } catch {
+        Write-Host "task not installed; run: ctl.ps1 install" -ForegroundColor Yellow
+    }
+}
+
 function Show-Savings {
     try {
         $resp = Invoke-WebRequest "http://127.0.0.1:$($cfg.restPort)/agentmemory/sessions" -UseBasicParsing -TimeoutSec 10
@@ -262,6 +315,9 @@ switch ($Command) {
     'uninstall'     { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Uninstaller }
     'ingest'        { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptRoot 'ingest.ps1') }
     'savings'       { Show-Savings }
+    'watcher'       { Show-Watcher }
+    'watcher-logs'  { Show-WatcherLogs }
+    'watcher-restart' { Restart-Watcher }
     'help'          { Get-Help $PSCommandPath -Detailed }
     default         { Show-Status }
 }

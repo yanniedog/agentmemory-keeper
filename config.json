@@ -9,7 +9,7 @@
   "healthCheckTimeoutSec": 5,
   "consecutiveFailuresBeforeRestart": 2,
   "restartCooldownSec": 60,
-  "maxRestartsPerHour": 6,
+  "maxRestartsPerHour": 12,
   "startupTimeoutSec": 60,
 
   "clockSkewSleepDetectSec": 300,

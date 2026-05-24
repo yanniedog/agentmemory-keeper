@@ -43,16 +43,31 @@ starts the keeper immediately. Verify:
 ## Daily use
 
 ```powershell
-.\ctl.ps1 status      # summary: daemon health, keeper pid, ports, last restarts
-.\ctl.ps1 savings     # current Token Savings % from the dashboard's formula
-.\ctl.ps1 ingest      # bulk-import all Claude Code transcripts (feeds savings)
-.\ctl.ps1 logs        # tail today's keeper log
-.\ctl.ps1 doctor      # full diagnostic dump for support
-.\ctl.ps1 restart     # force a full reclamation + restart cycle
-.\ctl.ps1 reclaim     # kill stuck processes / free ports (no restart)
-.\ctl.ps1 stop        # stop keeper + daemon (e.g. before manual upgrade)
-.\ctl.ps1 uninstall   # remove scheduled tasks (leaves agentmemory itself alone)
+.\ctl.ps1 status            # summary: daemon health, keeper pid, ports, last restarts
+.\ctl.ps1 savings           # current Token Savings % from the dashboard's formula
+.\ctl.ps1 watcher           # real-time transcript watcher status + queue depth
+.\ctl.ps1 watcher-logs      # tail watcher log
+.\ctl.ps1 watcher-restart   # restart the watcher
+.\ctl.ps1 ingest            # one-shot bulk-import of Claude Code transcripts
+.\ctl.ps1 logs              # tail today's keeper log
+.\ctl.ps1 doctor            # full diagnostic dump for support
+.\ctl.ps1 restart           # force a full reclamation + restart cycle
+.\ctl.ps1 reclaim           # kill stuck processes / free ports (no restart)
+.\ctl.ps1 stop              # stop keeper + daemon (e.g. before manual upgrade)
+.\ctl.ps1 uninstall         # remove scheduled tasks (leaves agentmemory itself alone)
 ```
+
+## Real-time transcript streaming
+
+The dashboard's Token Savings counter is observation-driven. Claude Code feeds it live via its hook chain; Cursor and Codex do not — they only persist transcripts to disk. The keeper installs a small Node watcher (`watcher.mjs`) as a third scheduled task that:
+
+- Tails every file under `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl` and `~/.codex/sessions/**/*.jsonl`.
+- For each new line it parses the Cursor or Codex schema, maps it to the same `POST /agentmemory/observe` shape the Claude hook chain uses, and POSTs at a conservative 2 obs/sec (so the iii-engine consolidation cycle never starves).
+- Maintains a per-file byte offset in `%LOCALAPPDATA%\agentmemory-keeper\watcher-state.json`, so a restart picks up exactly where it left off.
+- If the engine is unreachable (e.g. during a keeper-triggered restart), failed POSTs are appended to `watcher-queue.ndjson` and replayed every 60 seconds when the engine comes back. The queue is bounded only by disk.
+- Logs to `%LOCALAPPDATA%\agentmemory-keeper\logs\watcher-YYYY-MM-DD.log` with daily rotation.
+
+End result: as you use Cursor or Codex (or Claude Code), new observations land in agentmemory within a few seconds, the Token Savings counter rises live, and the dashboard reflects ongoing work without any manual import step.
 
 ## Why does the dashboard show 0% token savings?
 
