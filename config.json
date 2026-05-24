@@ -1,0 +1,22 @@
+{
+  "restPort": 3111,
+  "streamsPort": 3112,
+  "viewerPort": 3113,
+  "viewerFallbackPort": 3119,
+  "enginePort": 49134,
+
+  "healthCheckIntervalSec": 30,
+  "healthCheckTimeoutSec": 5,
+  "consecutiveFailuresBeforeRestart": 2,
+  "restartCooldownSec": 60,
+  "maxRestartsPerHour": 6,
+  "startupTimeoutSec": 60,
+
+  "clockSkewSleepDetectSec": 90,
+
+  "logRetentionDays": 14,
+  "agentmemoryConfigDir": "%USERPROFILE%\\.agentmemory",
+  "logDir": "%LOCALAPPDATA%\\agentmemory-keeper\\logs",
+  "stateDir": "%LOCALAPPDATA%\\agentmemory-keeper",
+  "agentmemoryCli": ""
+}
