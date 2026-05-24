@@ -127,9 +127,11 @@ function Save-State($state) {
 
 function Test-Health {
     param([int]$TimeoutMs = 5000, [int]$Port = $cfg.restPort)
-    # Probe several known endpoints. Any non-timeout response (incl. 404)
-    # proves the HTTP server is alive. Timeout / connection refused = down.
-    $paths = @('/api/v1/health', '/health', '/status', '/')
+    # /agentmemory/livez is the canonical liveness endpoint and returns
+    # 200 + {"service":"agentmemory","status":"ok"} when the engine is
+    # actually responsive. The other paths are kept as fallbacks because
+    # any non-timeout response proves the HTTP server is alive (even 404).
+    $paths = @('/agentmemory/livez', '/api/v1/health', '/health', '/status', '/')
     foreach ($p in $paths) {
         $url = "http://127.0.0.1:$Port$p"
         try {
@@ -296,7 +298,19 @@ function Start-Agentmemory {
         return $false
     }
 
-    $node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+    # Prefer the system Node install over any PATH inheritance (Cursor /
+    # Claude bundled helpers etc.) so the spawned engine does not depend
+    # on a sibling app staying installed at the same path.
+    $node = $null
+    foreach ($candidate in @(
+        (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')
+    )) {
+        if ($candidate -and (Test-Path $candidate)) { $node = $candidate; break }
+    }
+    if (-not $node) {
+        $node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+    }
     if ($cli -like '*.cmd' -or $cli -like '*.bat') {
         $exe = $cli
         $argList = @()
@@ -430,7 +444,45 @@ function Invoke-Once {
     return $ok
 }
 
+function Get-OtherKeeperDaemonPids {
+    # Find other PowerShell processes running this same keeper.ps1 -Daemon.
+    # Used to enforce single-instance semantics so the watchdog cannot
+    # accidentally spawn duplicate daemons during install/upgrade churn.
+    $self = $PID
+    return @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ProcessId -ne $self -and
+            $_.CommandLine -and
+            $_.CommandLine -match 'keeper\.ps1' -and
+            $_.CommandLine -match '-Daemon'
+        } | ForEach-Object { $_.ProcessId })
+}
+
+function Get-RateLimitWaitSec {
+    param($state)
+    $max = [int]$cfg.maxRestartsPerHour
+    $cutoff = (Get-Date).AddHours(-1)
+    $recent = @($state.restartHistory |
+        Where-Object { $_ -and ([datetime]$_) -gt $cutoff } |
+        ForEach-Object { [datetime]$_ } |
+        Sort-Object)
+    if ($recent.Count -lt $max) { return 0 }
+    # Sliding window: wait until the oldest in-window restart ages out
+    # plus a small buffer, instead of fixed cooldown that deadlocks the
+    # keeper for an entire hour when the budget is exhausted.
+    $waitUntil = $recent[0].AddHours(1).AddSeconds(5)
+    $sec = [int]([Math]::Max(60, ($waitUntil - (Get-Date)).TotalSeconds))
+    return $sec
+}
+
 function Invoke-Daemon {
+    # Single-instance guard.
+    $others = Get-OtherKeeperDaemonPids
+    if ($others.Count -gt 0) {
+        Write-Log ("Another keeper daemon is already running (pid={0}); exiting cleanly" -f ($others -join ',')) WARN
+        return
+    }
+
     Write-Log "Keeper daemon starting (pid=$PID, config=$ConfigPath)"
     Rotate-OldLogs
 
@@ -445,13 +497,17 @@ function Invoke-Daemon {
             $lastTickAt = $now
 
             if ($skew -gt $skewThreshold) {
-                Write-Log ("Clock skew {0:N0}s detected (sleep/wake/standby) - forcing restart cycle" -f $skew) WARN
-                $consecutiveFailures = [int]$cfg.consecutiveFailuresBeforeRestart
+                # Real sleep/wake means we cannot trust our last health
+                # belief; force one immediate probe but do NOT pre-bump
+                # consecutiveFailures. If the probe succeeds we are fine.
+                # If it fails we count the failure normally on this tick.
+                Write-Log ("Clock skew {0:N0}s detected (likely sleep/wake) - forcing immediate probe" -f $skew) WARN
+                $consecutiveFailures = 0
             }
 
             $health = Test-Health -TimeoutMs ([int]$cfg.healthCheckTimeoutSec * 1000)
 
-            if ($health.Healthy -and $consecutiveFailures -lt [int]$cfg.consecutiveFailuresBeforeRestart) {
+            if ($health.Healthy) {
                 if ($consecutiveFailures -gt 0) {
                     Write-Log ("Recovered after {0} failure(s)" -f $consecutiveFailures)
                 }
@@ -460,20 +516,21 @@ function Invoke-Daemon {
                 $st.lastHealthyAt = (Get-Date).ToString('o')
                 Save-State $st
             } else {
-                if (-not $health.Healthy) {
-                    $consecutiveFailures++
-                    Write-Log ("Health check failed (#{0}): {1}" -f $consecutiveFailures, $health.Error) WARN
-                }
+                $consecutiveFailures++
+                Write-Log ("Health check failed (#{0}): {1}" -f $consecutiveFailures, $health.Error) WARN
 
                 if ($consecutiveFailures -ge [int]$cfg.consecutiveFailuresBeforeRestart) {
                     $state = Load-State
-                    $cutoff = (Get-Date).AddHours(-1)
-                    $recent = @($state.restartHistory | Where-Object { $_ -and ([datetime]$_) -gt $cutoff })
-                    if ($recent.Count -ge [int]$cfg.maxRestartsPerHour) {
-                        Write-Log ("Rate limit reached ({0}/hr) - backing off" -f $recent.Count) WARN
-                        Start-Sleep -Seconds ([int]$cfg.restartCooldownSec)
+                    $waitSec = Get-RateLimitWaitSec -state $state
+                    if ($waitSec -gt 0) {
+                        Write-Log ("Rate limit hit ({0}/hr); sleeping {1}s until oldest restart ages out" -f [int]$cfg.maxRestartsPerHour, $waitSec) WARN
+                        Start-Sleep -Seconds $waitSec
+                        # Do not reset consecutiveFailures so the next iteration
+                        # re-evaluates and retries the moment the window opens.
                     } else {
                         $ok = Invoke-Restart -Reason ("{0} consecutive failures" -f $consecutiveFailures)
+                        $cutoff = (Get-Date).AddHours(-1)
+                        $recent = @($state.restartHistory | Where-Object { $_ -and ([datetime]$_) -gt $cutoff })
                         $state.restartHistory = @($recent) + @((Get-Date).ToString('o'))
                         Save-State $state
                         if ($ok) {

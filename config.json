@@ -12,7 +12,7 @@
   "maxRestartsPerHour": 6,
   "startupTimeoutSec": 60,
 
-  "clockSkewSleepDetectSec": 90,
+  "clockSkewSleepDetectSec": 300,
 
   "logRetentionDays": 14,
   "agentmemoryConfigDir": "%USERPROFILE%\\.agentmemory",
