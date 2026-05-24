@@ -61,6 +61,15 @@ const argv = new Set(process.argv.slice(2));
 const ONCE      = argv.has('--once');
 const DRY_RUN   = argv.has('--dry-run');
 const SINCE_ZERO= argv.has('--since-zero');
+const ALL_FILES = argv.has('--all-files');
+
+// Skip transcripts older than this many hours by default. The intent of
+// the watcher is real-time, not historical catch-up - bulk-importing old
+// transcripts can overwhelm the engine's consolidation cycle. Pass
+// --all-files to disable the age filter, or use ctl.ps1 ingest for a
+// targeted historical pass.
+const FRESH_WINDOW_HOURS = Number.parseInt(process.env.AGENTMEMORY_WATCHER_FRESH_HOURS || '24', 10);
+const FRESH_CUTOFF_MS = ALL_FILES ? 0 : Date.now() - FRESH_WINDOW_HOURS * 3600_000;
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -422,10 +431,20 @@ async function listCodexFiles() {
   return out;
 }
 
+function isFresh(filePath) {
+  if (FRESH_CUTOFF_MS === 0) return true;
+  try {
+    const st = statSync(filePath);
+    return st.mtimeMs >= FRESH_CUTOFF_MS;
+  } catch { return false; }
+}
+
 async function scanOnce(state) {
   const [cursorFiles, codexFiles] = await Promise.all([listCursorFiles(), listCodexFiles()]);
-  for (const f of cursorFiles) await processCursorFile(state, f);
-  for (const f of codexFiles)  await processCodexFile(state, f);
+  const cursorFresh = cursorFiles.filter(isFresh);
+  const codexFresh  = codexFiles.filter(isFresh);
+  for (const f of cursorFresh) await processCursorFile(state, f);
+  for (const f of codexFresh)  await processCodexFile(state, f);
 }
 
 // ---------------------------------------------------------------------------
