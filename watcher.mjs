@@ -24,7 +24,7 @@
  *
  * - The watcher registers a session via POST /agentmemory/session/start
  *   the first time it sees a session id, then POSTs every subsequent
- *   transcript entry as POST /agentmemory/observe — the same surface the
+ *   transcript entry as POST /agentmemory/observe â€” the same surface the
  *   Claude Code hook chain uses.
  *
  * Usage:
@@ -123,7 +123,7 @@ function scheduleSave(s) {
 // ---------------------------------------------------------------------------
 
 let tokens = RATE_PER_S;
-setInterval(() => { tokens = Math.min(RATE_PER_S, tokens + RATE_PER_S); }, 1000);
+setInterval(() => { tokens = Math.min(RATE_PER_S, tokens + RATE_PER_S); }, 1000).unref();
 
 async function take() {
   while (tokens <= 0) await new Promise((r) => setTimeout(r, 200));
@@ -367,7 +367,7 @@ async function processCodexFile(state, filePath) {
       continue;
     }
     if (!ctx) {
-      // First-time seeing this file mid-stream — try to infer from filename.
+      // First-time seeing this file mid-stream â€” try to infer from filename.
       ctx = inferCodexContext(filePath, null);
       await ensureSessionRegistered(state, ctx);
     }
